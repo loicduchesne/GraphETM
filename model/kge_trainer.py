@@ -94,6 +94,8 @@ class KGETrainer:
             if self.wandb:
                 self.wandb.log({'train/loss': train_loss, 'val/loss': val_loss}, step=epoch)
 
+        pbar.close()
+
         if self.wandb:
             self.wandb.finish()
 

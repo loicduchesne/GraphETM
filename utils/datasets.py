@@ -29,28 +29,24 @@ class IBKHDataset:
         self.gene_vocab_df    = pd.read_csv(os.path.join(self.data_dir, 'gene_vocab.csv'))
 
         # Map original ids (primary) to the new name.
-        self.drug_conv = dict(zip(self.drug_vocab_df['primary'], self.drug_vocab_df['name']))
+        self.drug_conv    = dict(zip(self.drug_vocab_df['primary'], self.drug_vocab_df['name']))
         self.disease_conv = dict(zip(self.disease_vocab_df['primary'], self.disease_vocab_df['icd_9']))
-        self.gene_conv = dict(zip(self.gene_vocab_df['primary'], self.gene_vocab_df['symbol']))
+        self.gene_conv    = dict(zip(self.gene_vocab_df['primary'], self.gene_vocab_df['symbol']))
 
         # Mapping dictionaries:
         # Maps the converted name to a unique integer index.
-        self.drug2id = {name: idx for idx, name in enumerate(self.drug_vocab_df['name'])}
+        self.drug2id    = {name: idx for idx, name in enumerate(self.drug_vocab_df['name'])}
         self.disease2id = {name: idx for idx, name in enumerate(self.disease_vocab_df['icd_9'])}
-        self.gene2id = {name: idx for idx, name in enumerate(self.gene_vocab_df['symbol'])}
-
-        # Canonical-name converters (fixed CSV columns)
-        self.drug_conv = dict(zip(self.drug_vocab_df['primary'],   self.drug_vocab_df['name']))
-        self.disease_conv = dict(zip(self.disease_vocab_df['primary'], self.disease_vocab_df['icd_9']))
-        self.gene_conv = dict(zip(self.gene_vocab_df['primary'],    self.gene_vocab_df['symbol']))
+        self.gene2id    = {name: idx for idx, name in enumerate(self.gene_vocab_df['symbol'])}
 
         # Data build_data
-        self.global2type = []
+        self.row2entity = [] # [(type, "TP53"), (type, "250.00"), ...] # @Deprecated global2type[]
         self.rel2id = {}
         self.triples = None
 
     def _rows_to_edges(self, df, src_conv, tgt_conv, src_map, tgt_map):
-        df = df[df.iloc[:, 2] == 1].copy() # keep confirmed edges
+        # df = df[df.iloc[:, 2] == 1].copy() # keep confirmed edges
+        df = df.copy()
 
         df['src'] = df.iloc[:, 0].map(src_conv)
         df['tgt'] = df.iloc[:, 1].map(tgt_conv)
@@ -74,12 +70,14 @@ class IBKHDataset:
         """
         offset = {}
         cursor = 0
-        for ntype, df in [('drug', self.drug_vocab_df),
-                          ('disease', self.disease_vocab_df),
-                          ('gene', self.gene_vocab_df)]:
+        for ntype, df, col in [
+            ('drug',    self.drug_vocab_df,    'name'),
+            ('disease', self.disease_vocab_df, 'icd_9'),
+            ('gene',    self.gene_vocab_df,    'symbol')]:
             offset[ntype] = cursor
-            self.global2type.extend([(ntype, i) for i in range(len(df))])
-            cursor += len(df)
+            names = df[col].tolist() # list of canonical names
+            self.row2entity.extend([(ntype, n) for n in names])
+            cursor += len(names)
 
         h, r, t = [], [], []
 
