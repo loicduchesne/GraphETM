@@ -1,15 +1,12 @@
 # Imports
 import os
-import glob
-import anndata
 import numpy as np
 import pandas as pd
 
 from tqdm.notebook import tqdm
 
 import torch
-import torch_geometric as pyg
-from torch_geometric.data import Data, HeteroData
+from torch_geometric.data import Data
 
 class IBKHDataset:
     def __init__(self, data_dir: str):
@@ -24,9 +21,9 @@ class IBKHDataset:
         self.data_dir = os.path.expanduser(data_dir)
 
         # Load vocab CSVs
-        self.drug_vocab_df    = pd.read_csv(os.path.join(self.data_dir, 'drug_vocab.csv'))
-        self.disease_vocab_df = pd.read_csv(os.path.join(self.data_dir, 'disease_vocab.csv'))
-        self.gene_vocab_df    = pd.read_csv(os.path.join(self.data_dir, 'gene_vocab.csv'))
+        self.drug_vocab_df    = pd.read_csv(os.path.join(data_dir, 'drug_vocab.csv'   )).dropna(subset='primary').drop_duplicates(subset='primary')
+        self.disease_vocab_df = pd.read_csv(os.path.join(data_dir, 'disease_vocab.csv')).dropna(subset='icd_9'  ).drop_duplicates(subset='icd_9'  )
+        self.gene_vocab_df    = pd.read_csv(os.path.join(data_dir, 'gene_vocab.csv'   )).dropna(subset='symbol' ).drop_duplicates(subset='symbol' )
 
         # Map original ids (primary) to the new name.
         self.drug_conv    = dict(zip(self.drug_vocab_df['primary'], self.drug_vocab_df['name']))
@@ -95,18 +92,18 @@ class IBKHDataset:
             r.append(torch.full_like(src_ids, rid))
 
         relations = [
-            ('D_D',   'drug',    'D_D',   'drug',
-             self.drug_conv,    self.drug_conv,    self.drug2id,    self.drug2id),
-            ('D_Di',  'drug',    'D_Di',  'disease',
+            ('D_D',             'drug',            'D_D',           'drug',
+             self.drug_conv,    self.drug_conv,    self.drug2id,    self.drug2id   ),
+            ('D_Di',            'drug',            'D_Di',          'disease',
              self.drug_conv,    self.disease_conv, self.drug2id,    self.disease2id),
-            ('D_G',   'drug',    'D_G',   'gene',
-             self.drug_conv,    self.gene_conv,    self.drug2id,    self.gene2id),
-            ('Di_Di', 'disease', 'Di_Di', 'disease',
+            ('D_G',             'drug',            'D_G',           'gene',
+             self.drug_conv,    self.gene_conv,    self.drug2id,    self.gene2id   ),
+            ('Di_Di',           'disease',         'Di_Di',         'disease',
              self.disease_conv, self.disease_conv, self.disease2id, self.disease2id),
-            ('Di_G',  'disease', 'Di_G',  'gene',
-             self.disease_conv, self.gene_conv,    self.disease2id, self.gene2id),
-            ('G_G',   'gene',    'G_G',   'gene',
-             self.gene_conv,    self.gene_conv,    self.gene2id,    self.gene2id),
+            ('Di_G',            'disease',         'Di_G',          'gene',
+             self.disease_conv, self.gene_conv,    self.disease2id, self.gene2id   ),
+            ('G_G',             'gene',            'G_G',           'gene',
+             self.gene_conv,    self.gene_conv,    self.gene2id,    self.gene2id   ),
         ]
 
         for rel_cfg in tqdm(relations, desc='Building triples...', unit='relations'):
