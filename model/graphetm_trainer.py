@@ -53,6 +53,7 @@ class GraphETMTrainer:
     def train(self,
               epochs,
               optimizer = None,
+              kl_annealing_epochs = None,
               verbose = True):
         """
         Train the model using the provided train_loaders and the specified num_epochs.
@@ -84,6 +85,13 @@ class GraphETMTrainer:
         #     if g.get('name') in ('embedding_sc', 'embedding_ehr'):
         #         for p in g['params']:
         #             p.requires_grad_(False)
+
+        # KL Annealing
+        kl_annealing = 1.0
+        kl_annealing_coef = 0.0
+        if kl_annealing_epochs is not None:
+            kl_annealing = 0.0
+            kl_annealing_coef = 1.0 / kl_annealing_epochs
 
         for epoch in range(epochs):
             # pbar.set_description('Training GraphETM')
@@ -124,7 +132,7 @@ class GraphETMTrainer:
                 bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
                 optimizer.zero_grad()
 
-                output = self.model.forward(bow_sc=bow_sc, bow_ehr=bow_ehr)
+                output = self.model.forward(bow_sc=bow_sc, bow_ehr=bow_ehr, kl_annealing=kl_annealing)
 
                 loss = output['loss']
                 loss.backward()
@@ -178,6 +186,9 @@ class GraphETMTrainer:
                         'val/recall@5': metrics['recall@5'],
                         },
                     commit=True)
+
+            # KL Annealing Update
+            kl_annealing += kl_annealing_coef
 
         pbar.close()
 
