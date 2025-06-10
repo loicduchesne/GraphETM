@@ -101,6 +101,7 @@ class GraphETMTrainer:
 
             train_losses = {
                 'loss': [],
+                'graph_rec_loss': [],
                 'sc': {
                     'rec_loss': [],
                     'kl'      : [],
@@ -149,11 +150,12 @@ class GraphETMTrainer:
                 if self.wandb is not None:
                     self.wandb.log({
                         'batch': global_step,
-                        'train/total_loss':     output['loss'].item(),
-                        'train/sc/recon_loss' : output['sc']['rec_loss'].item(),
-                        'train/sc/kld' :        float(output['sc']['kl'].detach().cpu()),
-                        'train/ehr/recon_loss': output['ehr']['rec_loss'].item(),
-                        'train/ehr/kld':        float(output['ehr']['kl'].detach().cpu()),
+                        'train/total_loss':       output['loss'].item(),
+                        'train/graph_recon_loss': output['graph_loss'].item(),
+                        'train/sc/recon_loss' :   output['sc']['rec_loss'].item(),
+                        'train/sc/kld' :          float(output['sc']['kl'].detach().cpu()),
+                        'train/ehr/recon_loss':   output['ehr']['rec_loss'].item(),
+                        'train/ehr/kld':          float(output['ehr']['kl'].detach().cpu()),
                     }, commit=True)
                 global_step += 1
 
