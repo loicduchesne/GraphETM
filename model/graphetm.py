@@ -58,16 +58,28 @@ class GraphETM:
                  device: torch.device=torch.device('cpu'),
                  wandb_run=None):
 
-        # Models
-        self.etm_model = Model(**model_cfg, embedding_dim=gcn_cfg['embedding_dim']).to(device)
+        ## Models
+        self.etm_model = Model(**model_cfg, embedding_dim=gcn_cfg['embedding_dim']).to(device) # TODO: Adjust model_cfg to account for rho
         self.graph_model = GraphFilter(**gcn_cfg, in_dim=embedding.shape[1], edge_index=edge_index).to(device)
         self.device = device
 
-        # Graph Embeddings
-        self.embedding = embedding # V x L
+        ## Graph Embeddings
+        self.rho_full = embedding # V x L
         self.edge_index = edge_index
         self.id_embed_sc  = torch.tensor(id_embed_sc , dtype=torch.long, device=device)
         self.id_embed_ehr = torch.tensor(id_embed_ehr, dtype=torch.long, device=device)
+
+        self.base_rho_sc  = embedding[id_embed_sc ].to(device)   # [V_sc , L]
+        self.base_rho_ehr = embedding[id_embed_ehr].to(device)   # [V_ehr, L]
+
+        # global2vocab map for indexing
+        # -1 for non-modality nodes
+        self.global2vocab_sc = -torch.ones(embedding.size(0), dtype=torch.long, device=device)
+        self.global2vocab_sc[self.id_embed_sc] = torch.arange(self.id_embed_sc.size(0), dtype=torch.long, device=device)
+
+        self.global2vocab_ehr = -torch.ones(embedding.size(0), dtype=torch.long, device=device)
+        self.global2vocab_ehr[self.id_embed_ehr] = torch.arange(self.id_embed_ehr.size(0), dtype=torch.long, device=device)
+
 
         self.dataloader_emb = NeighborLoader(
             **graphloader_cfg,
@@ -78,7 +90,7 @@ class GraphETM:
         self._emb_iter = cycle(self.dataloader_emb)
         self._emb_iter_val = cycle(self.dataloader_emb)
 
-        # Data
+        ## Data
         self.dataloader_sc  = dataloader_sc
         self.dataloader_ehr = dataloader_ehr
         self.val_dataloader_sc  = val_dataloader_sc
@@ -167,11 +179,27 @@ class GraphETM:
 
                 mask_sc  = torch.isin(g.n_id, self.id_embed_sc)
                 mask_ehr = torch.isin(g.n_id, self.id_embed_ehr)
-                rho_sc  = h[mask_sc]
-                rho_ehr = h[mask_ehr]
+
+                # Local positions in the subgraph
+                loc_sc  = mask_sc.nonzero(as_tuple=False).squeeze() # Should be 71
+                loc_ehr = mask_ehr.nonzero(as_tuple=False).squeeze()
+
+                # global IDs
+                global_sc  = g.n_id[loc_sc] # Should be 71
+                global_ehr = g.n_id[loc_ehr]
+
+                # map global IDs to row slots in modality vocab
+                row_sc  = self.global2vocab_sc[global_sc]
+                row_ehr = self.global2vocab_ehr[global_ehr]
+
+                rho_sc_full = self.base_rho_sc.clone()   # [V_sc, L]
+                rho_sc_full[row_sc] = h[loc_sc]
+
+                rho_ehr_full = self.base_rho_ehr.clone() # V [V_ehr, L]
+                rho_ehr_full[row_ehr] = h[loc_ehr]
 
                 # ETM: Forward
-                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr, kl_annealing=kl_annealing)
+                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc_full, rho_ehr=rho_ehr_full, kl_annealing=kl_annealing)
 
                 # ELBO Loss
                 loss = (outputs['sc']['rec_loss'] + outputs['ehr']['rec_loss']).mean() + (outputs['sc']['kl'] + outputs['ehr']['kl']) * kl_annealing + graph_loss
@@ -274,11 +302,27 @@ class GraphETM:
 
                 mask_sc  = torch.isin(g.n_id, self.id_embed_sc)
                 mask_ehr = torch.isin(g.n_id, self.id_embed_ehr)
-                rho_sc  = h[mask_sc]
-                rho_ehr = h[mask_ehr]
+
+                # Local positions in the subgraph
+                loc_sc  = mask_sc.nonzero(as_tuple=False).squeeze() # Should be 71
+                loc_ehr = mask_ehr.nonzero(as_tuple=False).squeeze()
+
+                # global IDs
+                global_sc  = g.n_id[loc_sc] # Should be 71
+                global_ehr = g.n_id[loc_ehr]
+
+                # map global IDs to row slots in modality vocab
+                row_sc  = self.global2vocab_sc[global_sc]
+                row_ehr = self.global2vocab_ehr[global_ehr]
+
+                rho_sc_full = self.base_rho_sc.clone()   # [V_sc, L]
+                rho_sc_full[row_sc] = h[loc_sc]
+
+                rho_ehr_full = self.base_rho_ehr.clone() # V [V_ehr, L]
+                rho_ehr_full[row_ehr] = h[loc_ehr]
 
                 # ETM: Forward
-                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
+                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc_full, rho_ehr=rho_ehr_full)
 
                 # ELBO Loss
                 loss = (outputs['sc']['rec_loss'] + outputs['ehr']['rec_loss']).mean() + outputs['sc']['kl'] + outputs['ehr']['kl'] + graph_loss
