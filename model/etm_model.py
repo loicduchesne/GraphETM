@@ -14,17 +14,17 @@ import torch.nn.functional as F
 
 ### GRAPH-ETM MODEL ARCHITECTURE
 ## Main GraphETM model.
-# Description: MODEL assembles the GraphETM architecture using the ENCODER, DECODER, and GRAPH_CONV_FILTER blocks.
+# Description: MODEL assembles the GraphETM architecture using the ENCODER and DECODER.
 
 # ------------------------------------------------------------------
-# @title GraphETM Model # TODO: I could potentially rename this etm_model (and the gcn graph_model) for consistency.
-class Model(nn.Module):
+# @title GraphETM Model # NOTE: I could potentially rename this etm_model (and the gcn graph_model) for consistency.
+class ETMModel(nn.Module):
     def __init__(
             self,
             encoder_params  : Dict[str, Dict[str, int]],
             theta_act: str,
-            embedding_dim : int,
             num_topics: int,
+            embedding_dim : int,
             dropout = 0.2
     ):
         """
@@ -45,7 +45,7 @@ class Model(nn.Module):
                 dropout: Dropout rate.
 
         """
-        super(Model, self).__init__()
+        super(ETMModel, self).__init__()
 
         self.encoder_params = encoder_params
 
@@ -76,7 +76,7 @@ class Model(nn.Module):
             Returns:
                 torch.Tensor: Deterministic topic proportions.
         """
-        theta = self.encoder.infer_topic_distribution(normalized_bows) # TODO: To fix.
+        theta = self.encoder.infer_topic_distribution(normalized_bows) # FIXME: To fix.
         return theta
 
     def get_beta(self, modality: str):
@@ -100,47 +100,52 @@ class Model(nn.Module):
             beta = decoder.get_beta().cpu().numpy()
         return beta
 
-    def graph_forward(self):
-        pass #  Maybe not idk
-
     def step_forward(self, encoder, decoder, bow, rho, aggregate=True):
         bow_raw  = bow # integer counts
         lengths  = bow_raw.sum(1, keepdim=True) + 1e-8
         bow_norm = bow_raw / lengths # Normalize
 
-        mu, logvar, kld = encoder(bow_norm)
+        mu, logvar, kld = encoder(bow_norm) # NOTE: Is normalization appropriate (e.g.: for EHR)? Guess not..idk
         z = self.reparameterize(mu, logvar)
-        theta = F.softmax(z, dim=-1) # D x K (batch_size x num_topics)
+        theta = F.softmax(z, dim=-1) # [D, K] (batch_size, num_topics)
 
-        preds = decoder(theta, rho=rho) # TODO: Shouldn't preds be the same shape as bow?
-        rec_loss = -(preds * bow_raw).sum(1) #/ lengths.squeeze(1) # Dev. note: lengths.squeeze(1) is the only key difference.
+        preds = decoder(theta, rho=rho)
+        rec_loss = -(preds * bow_raw).sum(1) / lengths.squeeze(1) # NOTE: lengths.squeeze(1) is the only key difference.
         if aggregate:
             rec_loss = rec_loss.mean()
 
-        return {
-            'rec_loss': rec_loss,
-            'kl'      : kld,
-            'theta'   : theta.detach(),
-            'preds'   : preds.detach(),
-        }
+        return ({'theta': theta.detach(), 'preds': preds.detach()}, # Outputs
+                {'rec_loss': rec_loss,'kld': kld})                   # Losses
 
-    def forward(self, bow_sc, bow_ehr, rho_sc, rho_ehr, kl_annealing=1.0):
+    def forward(self, bow_sc, bow_ehr, rho_sc, rho_ehr):
+        """
+        Forward pass for the multi-modal Embedded Topic Model (ETM).
+        Args:
+            bow_sc : Bag-of-words representation of single-cell (SC) RNA modality.
+            bow_ehr: Bag-of-words representation of Electronic Health Record (EHR) modality.
+            rho_sc : Embedding rho for the single-cell (SC) RNA modality.
+            rho_ehr: Embedding rho for the Electronic Health Record (EHR) modality.
+
+        Returns:
+            Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]: Tuple (outputs, losses) with outputs and losses
+            dictionaries. Access the modality outputs with keys 'sc' or 'ehr' for either dictionary. Modalities within
+            outputs contain keys 'theta' and 'preds'. Modalities within losses contain keys 'rec_loss' and 'kld'.
+
+        """
         # Encoder-Decoder: ScRNA
-        output_sc = self.step_forward(
+        outputs_sc, losses_sc = self.step_forward(
             bow=bow_sc,
             encoder=self.enc_sc,
             decoder=self.dec_sc,
             rho=rho_sc)
 
         # Encoder-Decoder: EHR
-        output_ehr = self.step_forward(
+        outputs_ehr, losses_ehr = self.step_forward(
             bow=bow_ehr,
             encoder=self.enc_ehr,
             decoder=self.dec_ehr,
             rho=rho_ehr)
 
 
-        return {
-            'sc' : output_sc,
-            'ehr': output_ehr,
-        }
+        return ({'sc': outputs_sc, 'ehr': outputs_ehr}, # Outputs
+                {'sc': losses_sc , 'ehr': losses_ehr})  # Losses

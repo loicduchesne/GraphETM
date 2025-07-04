@@ -1,18 +1,16 @@
 ### Imports
 # Local
-from .model import Model
-from .conv_filter import GraphFilter
+from .etm_model import ETMModel
+from .graph_model import GraphModel
 from .loss import graph_recon_loss
+from .utils.run_helper import RunManager
 
 # External
 import numpy as np
-from itertools import cycle
+from typing import Dict, Any, Optional, List, Union
 
 import torch
 import torch.nn.functional as F
-
-from torch_geometric.data import Data
-from torch_geometric.loader import NeighborLoader
 
 import wandb
 from tqdm.notebook import tqdm, trange
@@ -21,74 +19,58 @@ from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 
 
-# TRAINER
+### GRAPHETM MODEL (TRAINER)
 class GraphETM:
     """
-    GraphETM model  Embedded Topic Model (ETM) Encoder and Decoder with the Graph Embeddings rho.
+    GraphETM model with an Embedded Topic Model (ETM) Encoder and Decoder and a Graph Convolutional Network (GCN) Filter.
 
     Args:
-        model: The GraphETM model.
-
-        embedding: Initial embedding (also known as rho) computed from the knowledge graph (e.g.: TransE embeddings).
-
-        dataloader_sc (torch.utils.data.DataLoader): The dataloader for the scRNA BoW data. Rows are cells and columns are genes.
-        dataloader_ehr (torch.utils.data.DataLoader): The dataloader for the EHR BoW data. Rows are patients and columns are ICD 9 codes.
-        val_dataloader_sc (torch.utils.data.DataLoader): (Optional) The validation dataloader for the scRNA BoW data.
-        val_dataloader_ehr (torch.utils.data.DataLoader): (Optional) The validation dataloader for the EHR BoW data.
+        etm_model_cfg (dict): The ETM model parameters.
+        graph_model_cfg (dict): The Graph filter model parameters.
+        embedding (torch.Tensor): Initial embedding (also known as rho) computed from the knowledge graph (e.g.:
+            TransE embeddings).
+        edge_index (torch.LongTensor): The edge indices for the embedding matrix.
+        dataloader_sc (torch.utils.data.DataLoader): The dataloader for the scRNA BoW data. Rows are cells and columns
+            are genes.
+        dataloader_ehr (torch.utils.data.DataLoader): The dataloader for the EHR BoW data. Rows are patients and
+            columns are ICD 9 codes.
+        val_dataloader_sc (torch.utils.data.DataLoader, optional): The validation dataloader for the scRNA BoW data.
+            Default: None.
+        val_dataloader_ehr (torch.utils.data.DataLoader, optional): The validation dataloader for the EHR BoW data.
+            Default: None.
         device (torch.device): Device to be used.
-        wandb_run: (Optional) Wandb run object.
+            Default: torch.device('cpu').
+        wandb_run (optional): Wandb run object.
+            Default: None.
     """
     def __init__(self,
                  # Models:
-                 model_cfg,
-                 gcn_cfg,
+                 etm_model_cfg: Dict[str, Any],
+                 graph_model_cfg: Dict[str, Any],
                  # Embedding:
                  embedding: torch.Tensor,
-                 graphloader_cfg: dict,
                  edge_index: torch.LongTensor,
                  id_embed_sc : np.ndarray,
                  id_embed_ehr: np.ndarray,
                  # Data:
-                 dataloader_sc,
-                 dataloader_ehr,
-                 val_dataloader_sc=None,
-                 val_dataloader_ehr=None,
+                 dataloader_sc: torch.utils.data.DataLoader,
+                 dataloader_ehr: torch.utils.data.DataLoader,
+                 val_dataloader_sc: torch.utils.data.DataLoader = None,
+                 val_dataloader_ehr: torch.utils.data.DataLoader = None,
                  # Params:
-                 trainable_embeddings=False, # Must be false to keep embeddings stable.
-                 device: torch.device=torch.device('cpu'),
-                 wandb_run=None):
+                 device: torch.device = torch.device('cpu'),
+                 wandb_run = None):
 
         ## Models
-        self.etm_model = Model(**model_cfg, embedding_dim=gcn_cfg['embedding_dim']).to(device) # TODO: Adjust model_cfg to account for rho
-        self.graph_model = GraphFilter(**gcn_cfg, in_dim=embedding.shape[1], edge_index=edge_index).to(device)
+        self.etm_model = ETMModel(**etm_model_cfg, embedding_dim=graph_model_cfg['embedding_dim']).to(device) # TODO: Adjust model_cfg to account for rho
+        self.graph_model = GraphModel(**graph_model_cfg, edge_index=edge_index.to(device), embedding=embedding).to(device)
         self.device = device
 
         ## Graph Embeddings
-        self.rho_full = embedding # V x L
+        self.rho_full = embedding    # [N_total, L]
         self.edge_index = edge_index
         self.id_embed_sc  = torch.tensor(id_embed_sc , dtype=torch.long, device=device)
         self.id_embed_ehr = torch.tensor(id_embed_ehr, dtype=torch.long, device=device)
-
-        self.base_rho_sc  = embedding[id_embed_sc ].to(device)   # [V_sc , L]
-        self.base_rho_ehr = embedding[id_embed_ehr].to(device)   # [V_ehr, L]
-
-        # global2vocab map for indexing
-        # -1 for non-modality nodes
-        self.global2vocab_sc = -torch.ones(embedding.size(0), dtype=torch.long, device=device)
-        self.global2vocab_sc[self.id_embed_sc] = torch.arange(self.id_embed_sc.size(0), dtype=torch.long, device=device)
-
-        self.global2vocab_ehr = -torch.ones(embedding.size(0), dtype=torch.long, device=device)
-        self.global2vocab_ehr[self.id_embed_ehr] = torch.arange(self.id_embed_ehr.size(0), dtype=torch.long, device=device)
-
-
-        self.dataloader_emb = NeighborLoader(
-            **graphloader_cfg,
-            data=Data(x=embedding, edge_index=edge_index),
-            input_nodes=None,
-        )
-
-        self._emb_iter = cycle(self.dataloader_emb)
-        self._emb_iter_val = cycle(self.dataloader_emb)
 
         ## Data
         self.dataloader_sc  = dataloader_sc
@@ -96,257 +78,149 @@ class GraphETM:
         self.val_dataloader_sc  = val_dataloader_sc
         self.val_dataloader_ehr = val_dataloader_ehr
 
-        self.proxy_sc  = None
+        ## ARI clustering
+        self.proxy_sc = None
         self.proxy_ehr = None
 
-        self.wandb = wandb_run
-        self.history = []
+        if wandb_run:
+            self.run_manager = RunManager(wandb_run=wandb_run)
 
     # ------------------------------------------------------------------
     def train(self,
-              epochs,
-              optimizer = None,
-              kl_annealing_duration = None,
-              verbose = True):
+              epochs: int,
+              optimizer: torch.optim.Optimizer,
+              graph_loss_subsampling_size: int = None,
+              recon_loss_weight: float = 1.0,
+              graph_loss_weight: float = 1.0,
+              kld_max: float = 1.0,
+              kld_annealing_duration: int = None,
+              verbose: bool = True):
         """
         Train the model using the provided train_loaders and the specified num_epochs.
 
         Args:
             epochs (int): Number of epochs to train.
             optimizer (torch.optim.Optimizer): Optimizer to use.
-            kl_annealing_duration (float): The duration (in epochs) for the KL Divergence to progressively reach its full magnitude.
-            verbose (bool): Disables training progress (e.g.: when optimizing hyperparameters with Optuna).
+            graph_loss_subsampling_size (int, optional): Subsampling size for graph reconstruction.
+                Default: None.
+            recon_loss_weight (float, optional): Weight for reconstruction loss.
+                Default: 1.0.
+            graph_loss_weight (float, optional): Weight for graph reconstruction loss.
+                Default: 1.0.
+            kld_max (float, optional): Maximum value for KL Divergence.
+                Default: 1.0.
+            kld_annealing_duration (int, optional): The duration (in epochs) for the KL Divergence to progressively
+                reach its full magnitude. Default: None.
+            verbose (bool, optional): Disables training progress (e.g.: when optimizing hyperparameters with Optuna).
+                Default: True.
         """
-        self.etm_model.to(self.device), self.graph_model.to(self.device)
-        global_step = 0
+        with self.run_manager.wandb_run(): # Catches failed runs
+            self.etm_model.to(self.device), self.graph_model.to(self.device)
 
-        if self.wandb is not None:
-            self.wandb.watch(
-                self.etm_model,
-                log_freq=1,
-                log='all'
-            )
+            if self.run_manager:
+                self.run_manager.wandb.watch(self.etm_model, log_freq=1, log='all')
+                self.run_manager.wandb.watch(self.graph_model, log_freq=1, log='all')
 
-        pbar = trange(
-            epochs,
-            desc='Training GraphETM',
-            unit='epoch',
-            disable=not verbose,
-            )
+            pbar = trange(epochs, desc='Training GraphETM', unit='epoch', disable=not verbose)
 
-        # KL Annealing
-        kl_annealing = 1.0
-        kl_annealing_coef = 0.0
-        if kl_annealing_duration is not None:
-            kl_annealing = 0.0
-            kl_annealing_coef = 1.0 / kl_annealing_duration
+            for epoch in range(epochs):
+                pbar.update(1)
+                # training ------------------------------------------------
+                self.etm_model.train(), self.graph_model.train()
 
-        for epoch in range(epochs):
-            pbar.update(1)
-            # training ------------------------------------------------
-            self.etm_model.train()
-            self.graph_model.train()
+                # KL Annealing
+                if kld_annealing_duration is not None:
+                    kl_annealing = min(kld_max, epoch / kld_annealing_duration)
+                else:
+                    kl_annealing = 1.0
 
-            train_losses = {
-                'loss': [],
-                'graph_rec_loss': [],
-                'sc': {
-                    'rec_loss': [],
-                    'kl'      : [],
-                },
-                'ehr': {
-                    'rec_loss': [],
-                    'kl'      : [],
-                }
-            }
+                for bow_sc, bow_ehr in zip(self.dataloader_sc, self.dataloader_ehr): # FIXME: Load all of the datasets.
+                    if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
+                        continue
 
-            for bow_sc, bow_ehr in zip(self.dataloader_sc, self.dataloader_ehr):
-                g = next(self._emb_iter)
+                    # Zero grad
+                    optimizer.zero_grad()
 
-                if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
-                    continue
+                    # To Device
+                    bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
 
-                # Zero grad
-                optimizer.zero_grad()
+                    # Filter: Forward
+                    rho_full_new = self.graph_model.forward() # [N_total, L]
+                    graph_loss = graph_recon_loss(rho_full_new, edge_index=self.edge_index, subsampling_size=graph_loss_subsampling_size) * graph_loss_weight
 
-                # To Device
-                g = g.to(self.device)
-                bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
+                    rho_sc  = rho_full_new[self.id_embed_sc ] # [V_sc , L]
+                    rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
 
-                # Graph: Forward
-                h = self.graph_model(g.x, g.edge_index)
-                graph_loss = graph_recon_loss(h, g.edge_index)
+                    # ETM: Forward
+                    outputs, losses = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
 
-                mask_sc  = torch.isin(g.n_id, self.id_embed_sc)
-                mask_ehr = torch.isin(g.n_id, self.id_embed_ehr)
+                    # ELBO Loss
+                    loss = (losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean() + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss
+                    loss.backward()
+                    optimizer.step()
 
-                # Local positions in the subgraph
-                loc_sc  = mask_sc.nonzero(as_tuple=False).squeeze() # Should be 71
-                loc_ehr = mask_ehr.nonzero(as_tuple=False).squeeze()
+                    # Log (batch-level)
+                    self.run_manager.log('total_loss', loss, on_step=True, phase='train')
+                    self.run_manager.log('graph_recon_loss', graph_loss, on_step=True, phase='train')
+                    self.run_manager.log_dict(losses, on_step=True, phase='train')
+                    self.run_manager.next_step()
 
-                # global IDs
-                global_sc  = g.n_id[loc_sc] # Should be 71
-                global_ehr = g.n_id[loc_ehr]
+                # validation ------------------------------------------------
+                if self.val_dataloader_sc:
+                    self._evaluate(self.val_dataloader_sc, self.val_dataloader_ehr, kl_annealing)
 
-                # map global IDs to row slots in modality vocab
-                row_sc  = self.global2vocab_sc[global_sc]
-                row_ehr = self.global2vocab_ehr[global_ehr]
-
-                rho_sc_full = self.base_rho_sc.clone()   # [V_sc, L]
-                rho_sc_full[row_sc] = h[loc_sc]
-
-                rho_ehr_full = self.base_rho_ehr.clone() # V [V_ehr, L]
-                rho_ehr_full[row_ehr] = h[loc_ehr]
-
-                # ETM: Forward
-                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc_full, rho_ehr=rho_ehr_full, kl_annealing=kl_annealing)
-
-                # ELBO Loss
-                loss = (outputs['sc']['rec_loss'] + outputs['ehr']['rec_loss']).mean() + (outputs['sc']['kl'] + outputs['ehr']['kl']) * kl_annealing + graph_loss
-                loss.backward()
-                optimizer.step()
-
-                # Save Loss # TODO: Clean this mess.
-                train_losses['loss'].append(loss.item())
-                train_losses['sc']['rec_loss'].append(outputs['sc']['rec_loss'].mean().item())
-                train_losses['sc']['kl'].append(outputs['sc']['kl'].detach().cpu())
-                train_losses['ehr']['rec_loss'].append(outputs['ehr']['rec_loss'].mean().item())
-                train_losses['ehr']['kl'].append(outputs['ehr']['kl'].detach().cpu())
-
-                # Wandb (batch-level update)
-                if self.wandb is not None:
-                    self.wandb.log({
-                        'batch': global_step,
-                        'train/total_loss':       loss.item(),
-                        'train/graph_recon_loss': graph_loss.item(),
-                        'train/sc/recon_loss' :   outputs['sc']['rec_loss'].item(),
-                        'train/sc/kld' :          float(outputs['sc']['kl'].detach().cpu()),
-                        'train/ehr/recon_loss':   outputs['ehr']['rec_loss'].item(),
-                        'train/ehr/kld':          float(outputs['ehr']['kl'].detach().cpu()),
-                    }, commit=True)
-                global_step += 1
-
-
-            # validation ------------------------------------------------
-            val_losses = None
-            metrics = None
-            if self.val_dataloader_sc:
-                val_losses, metrics = self._evaluate(self.val_dataloader_sc, self.val_dataloader_ehr)
-
-            self.history.append((epoch, train_losses, val_losses))
-
-            # Wandb (epoch-level update)
-            if self.wandb is not None:
-                self.wandb.log(
-                    data={
-                        # Validation
-                        'epoch': epoch,
-                        'val/total_loss':     np.mean(val_losses['loss']),
-                        'val/sc/recon_loss' : np.mean(val_losses['sc']['rec_loss']),
-                        'val/sc/kld' :        np.mean(val_losses['sc']['kl']),
-                        'val/ehr/recon_loss': np.mean(val_losses['ehr']['rec_loss']),
-                        'val/ehr/kld':        np.mean(val_losses['ehr']['kl']),
-                        # Metrics
-                        'val/sc/ari' : metrics['sc' ]['ari'],
-                        'val/ehr/ari': metrics['ehr']['ari'],
-                        'val/sc/td' : metrics['sc' ]['td'],
-                        'val/ehr/td': metrics['ehr']['td'],
-                        'val/recall@5': metrics['recall@5'],
-                        },
-                    commit=True)
-
-            # KL Annealing Update
-            kl_annealing += kl_annealing_coef
-
-        pbar.close()
+                self.run_manager.next_epoch()
+            pbar.close()
 
 
     # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-    def _evaluate(self, loader_sc, loader_ehr):
-        self.etm_model.eval()
-        self.graph_model.eval()
+    def _evaluate(self, loader_sc, loader_ehr, kl_annealing):
+        self.etm_model.eval(), self.graph_model.eval()
 
         with torch.no_grad():
-            losses = {
-                'loss': [],
-                'sc': {
-                    'rec_loss': [],
-                    'kl'      : [],
-                },
-                'ehr': {
-                    'rec_loss': [],
-                    'kl'      : [],
-                }
-            }
-            metrics = {
-                'sc' : {},
-                'ehr': {},
-                'recall@5': 0
-            }
-
             theta_sc_batches  = []
             theta_ehr_batches = []
             for bow_sc, bow_ehr in zip(loader_sc, loader_ehr): # TODO: (DONE) Batch embedding here as well (although because of nograd maybe i can do the full)
-                g = next(self._emb_iter_val)
-
                 if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
                     continue
 
                 # To Device
-                g = g.to(self.device)
                 bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
 
                 # Graph: Forward
-                h = self.graph_model(g.x, g.edge_index)
-                graph_loss = graph_recon_loss(h, g.edge_index)
+                rho_full_new = self.graph_model.forward() # [N_total, L]
+                graph_loss = graph_recon_loss(rho_full_new, edge_index=self.edge_index, subsampling_size=10000)
 
-                mask_sc  = torch.isin(g.n_id, self.id_embed_sc)
-                mask_ehr = torch.isin(g.n_id, self.id_embed_ehr)
-
-                # Local positions in the subgraph
-                loc_sc  = mask_sc.nonzero(as_tuple=False).squeeze() # Should be 71
-                loc_ehr = mask_ehr.nonzero(as_tuple=False).squeeze()
-
-                # global IDs
-                global_sc  = g.n_id[loc_sc] # Should be 71
-                global_ehr = g.n_id[loc_ehr]
-
-                # map global IDs to row slots in modality vocab
-                row_sc  = self.global2vocab_sc[global_sc]
-                row_ehr = self.global2vocab_ehr[global_ehr]
-
-                rho_sc_full = self.base_rho_sc.clone()   # [V_sc, L]
-                rho_sc_full[row_sc] = h[loc_sc]
-
-                rho_ehr_full = self.base_rho_ehr.clone() # V [V_ehr, L]
-                rho_ehr_full[row_ehr] = h[loc_ehr]
+                rho_sc  = rho_full_new[self.id_embed_sc ] # [V_sc , L]
+                rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
 
                 # ETM: Forward
-                outputs = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc_full, rho_ehr=rho_ehr_full)
+                outputs, losses = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
 
                 # ELBO Loss
-                loss = (outputs['sc']['rec_loss'] + outputs['ehr']['rec_loss']).mean() + outputs['sc']['kl'] + outputs['ehr']['kl'] + graph_loss
+                loss = (losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean() + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss * 0.01
 
                 # Theta
                 theta_sc_batches.append(outputs['sc']['theta'].cpu())
                 theta_ehr_batches.append(outputs['ehr']['theta'].cpu())
 
-                # Loss
-                losses['loss'].append(loss.item())
-                losses['sc']['rec_loss'].append(outputs['sc']['rec_loss'].mean().item())
-                losses['sc']['kl'].append(outputs['sc']['kl'].item())
-                losses['ehr']['rec_loss'].append(outputs['ehr']['rec_loss'].mean().item())
-                losses['ehr']['kl'].append(outputs['ehr']['kl'].item())
+                # Log (batch-level)
+                self.run_manager.log('total_loss', loss, on_step=True, phase='val', aggregate=True)
+                self.run_manager.log('graph_recon_loss', graph_loss, on_step=True, phase='val', aggregate=True)
+                self.run_manager.log_dict(losses, on_step=True, phase='val', aggregate=True)
 
             ### METRICS
             theta_sc  = torch.cat(theta_sc_batches)
             theta_ehr = torch.cat(theta_ehr_batches)
 
-            metrics['sc']['ari'], metrics['ehr']['ari'] = self.measure_ari(theta_sc, theta_ehr)
-            metrics['sc']['td'], metrics['ehr']['td'] = self.topic_diversity()
-            metrics['recall@5'] = self.ehr_from_scrna_recall(theta_sc, theta_ehr)
+            ari    = self.measure_ari(theta_sc, theta_ehr)
+            td     = self.topic_diversity()
+            top_al = self.topic_embedding_alignment()
 
-        return losses, metrics
+            # Log (epoch-level)
+            self.run_manager.log_dict({'sc/ari': ari[0], 'ehr/ari': ari[1]}, on_epoch=True, phase='val')
+            self.run_manager.log_dict({'sc/td': td[0], 'ehr/td': td[1]}, on_epoch=True, phase='val')
+            self.run_manager.log('topic_emb_alignment', top_al, on_epoch=True, phase='val')
 
 
     # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -404,6 +278,37 @@ class GraphETM:
 
         return td_sc, td_ehr
 
+    def topic_embedding_alignment(self, top_k=15):
+        """
+        Check if topics learn similar patterns in embedding space
+        """
+        # Get average embeddings for top words in each topic
+        beta_sc = self.etm_model.dec_sc.get_beta()
+        beta_ehr = self.etm_model.dec_ehr.get_beta()
+
+        topic_emb_sc = []
+        topic_emb_ehr = []
+
+        for k in range(beta_sc.shape[0]):
+            # Top genes
+            top_genes = beta_sc[k].topk(top_k).indices # Top genes for topic k
+            gene_embs = self.graph_model.forward()[self.id_embed_sc[top_genes]]
+            topic_emb_sc.append(gene_embs.mean(0))
+
+            # Top diseases
+            top_diseases = beta_ehr[k].topk(top_k).indices # Top diseases for topic k
+            disease_embs = self.graph_model.forward()[self.id_embed_ehr[top_diseases]]
+            topic_emb_ehr.append(disease_embs.mean(0))
+
+        # Compare topic embeddings between modalities
+        topic_emb_sc = torch.stack(topic_emb_sc)
+        topic_emb_ehr = torch.stack(topic_emb_ehr)
+
+        # Cosine similarity between corresponding topics
+        cos_sim = F.cosine_similarity(topic_emb_sc, topic_emb_ehr)
+        return cos_sim.mean().item()
+
+    # @deprecated('This metric is not relevant since I am doing unpaired integration.')
     def ehr_from_scrna_recall(self, theta_sc, theta_ehr, k=5):
         th_sc  = F.normalize(theta_sc, p=2, dim=1)
         th_ehr = F.normalize(theta_ehr, p=2, dim=1)

@@ -67,7 +67,7 @@ class Encoder(nn.Module):
         theta = F.softmax(mu_theta, dim=-1)
         return theta
 
-    def forward(self, bow_norm: torch.Tensor, free_nat: int = 0.5):
+    def forward(self, bow_norm: torch.Tensor):
         """
         Returns parameters of the variational distribution for \theta.
 
@@ -88,8 +88,6 @@ class Encoder(nn.Module):
 
         # KL[q(theta)||p(theta)] = lnq(theta) - lnp(theta)
         kl_theta = -0.5 * torch.sum(1 + logsigma_theta - mu_theta.pow(2) - logsigma_theta.exp(), dim=1).mean()
-        # Free-bits
-        # kl_theta = torch.clamp(kl_theta, min=free_nat).mean()
 
         return mu_theta, logsigma_theta, kl_theta
 

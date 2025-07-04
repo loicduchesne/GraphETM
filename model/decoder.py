@@ -31,10 +31,13 @@ class Decoder(nn.Module):
         # Objective: The latent topic distribution theta for (scRNA and EHR) are multiplied with Beta (essentially grounding the latent topics with the knowledge).
 
         ## define the word embedding matrix \rho
-        self.rho = None # V x L TODO: Temporarily L x V.
+        self.rho = None # [V, L]
 
         ## define the matrix containing the topic embeddings
-        self.alphas = nn.Linear(embedding_dim, num_topics, bias=False) # TODO: Temporary measure switching K and L.
+        self.alphas = nn.Linear(embedding_dim, num_topics, bias=False)
+
+        ## define beta
+        self.beta = None
 
     def get_beta(self):
         """
@@ -44,11 +47,11 @@ class Decoder(nn.Module):
                 Beta which represents the topic-word (or topic-feature) distributions.
         """
         logits = self.alphas(self.rho)
-        beta = F.softmax(logits.T, dim=1) # TODO: Transposing here for fun i guess.
-        return beta
+        self.beta = F.softmax(logits.T, dim=1) # TODO: Transposing here now for fun i guess.
+        return self.beta
 
     def forward(self, theta, rho):
-        self.rho = rho # Update embeddings # TODO: Temporary measure for transpose.
+        self.rho = rho # Update embeddings
 
         beta = self.get_beta()
         preds = torch.log(torch.mm(theta, beta) + 1e-8)
