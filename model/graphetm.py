@@ -8,6 +8,7 @@ from .utils.run_helper import RunManager
 # External
 import numpy as np
 from typing import Dict, Any, Optional, List, Union
+from itertools import cycle
 
 import torch
 import torch.nn.functional as F
@@ -134,7 +135,13 @@ class GraphETM:
                 else:
                     kl_annealing = 1.0
 
-                for bow_sc, bow_ehr in zip(self.dataloader_sc, self.dataloader_ehr): # FIXME: Load all of the datasets.
+                # Data cycling (datasets different lengths)
+                if len(self.dataloader_sc) > len(self.dataloader_ehr):
+                    dataloader = zip(self.dataloader_sc, cycle(self.dataloader_ehr))
+                else:
+                    dataloader = zip(cycle(self.dataloader_sc), self.dataloader_ehr)
+
+                for bow_sc, bow_ehr in dataloader: # FIXME: Load all of the datasets.
                     if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
                         continue
 
@@ -167,20 +174,26 @@ class GraphETM:
 
                 # validation ------------------------------------------------
                 if self.val_dataloader_sc:
-                    self._evaluate(self.val_dataloader_sc, self.val_dataloader_ehr, kl_annealing)
+                    self._evaluate(kl_annealing, graph_loss_subsampling_size,recon_loss_weight, graph_loss_weight)
 
                 self.run_manager.next_epoch()
             pbar.close()
 
 
     # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-    def _evaluate(self, loader_sc, loader_ehr, kl_annealing):
+    def _evaluate(self, kl_annealing, graph_loss_subsampling_size, recon_loss_weight, graph_loss_weight):
         self.etm_model.eval(), self.graph_model.eval()
 
         with torch.no_grad():
+            # Data cycling
+            if len(self.val_dataloader_sc) > len(self.val_dataloader_ehr):
+                dataloader = zip(self.val_dataloader_sc, cycle(self.val_dataloader_ehr))
+            else:
+                dataloader = zip(cycle(self.val_dataloader_sc), self.val_dataloader_ehr)
+
             theta_sc_batches  = []
             theta_ehr_batches = []
-            for bow_sc, bow_ehr in zip(loader_sc, loader_ehr): # TODO: (DONE) Batch embedding here as well (although because of nograd maybe i can do the full)
+            for bow_sc, bow_ehr in dataloader:
                 if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
                     continue
 
@@ -189,7 +202,7 @@ class GraphETM:
 
                 # Graph: Forward
                 rho_full_new = self.graph_model.forward() # [N_total, L]
-                graph_loss = graph_recon_loss(rho_full_new, edge_index=self.edge_index, subsampling_size=10000)
+                graph_loss = graph_recon_loss(rho_full_new, edge_index=self.edge_index, subsampling_size=graph_loss_subsampling_size)
 
                 rho_sc  = rho_full_new[self.id_embed_sc ] # [V_sc , L]
                 rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
@@ -198,7 +211,7 @@ class GraphETM:
                 outputs, losses = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
 
                 # ELBO Loss
-                loss = (losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean() + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss * 0.01
+                loss = (losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean() + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss * graph_loss_weight
 
                 # Theta
                 theta_sc_batches.append(outputs['sc']['theta'].cpu())

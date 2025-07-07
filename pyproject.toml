@@ -3,7 +3,7 @@ name = "graphetm"
 version = "2025.06.rev"
 description = "Graph-Embedded Topic model integrating scRNA-seq gene expression and Electronic Health Records (EHR) with a biomedical knowledge graph."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "ipykernel>=6.29.5",
     "jupyterlab>=4.4.2",
@@ -13,6 +13,7 @@ dependencies = [
     "plotly>=6.0.1",
     "scanpy>=1.11.1",
     "scipy==1.15.3",
+    "scipy-stubs==1.16.0.2",
     "torch>=2.7.0",
     "torch-geometric>=2.6.1",
     "wandb>=0.19.11",
