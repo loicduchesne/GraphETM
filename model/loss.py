@@ -1,3 +1,5 @@
+from typing import Dict, Any, Optional, List
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,66 +12,74 @@ class ELBO(nn.Module):
 
 
 ### GRAPH RECONSTRUCTION LOSS
-# FULL LOSS
-def _full_graph_recon_loss(h: torch.Tensor, edge_index: torch.LongTensor):
-    # Positive edges
-    pos_edge_index = edge_index  # shape [2, E_pos]
+class GraphReconLoss(nn.Module):
+    def __init__(
+            self,
+            num_neg_samples: int = None
+    ):
+        super(GraphReconLoss, self).__init__()
 
-    # Negative edges
-    neg_edge_index = pyg_utils.negative_sampling(
-        edge_index=pos_edge_index,
-        num_nodes=h.size(0),
-        num_neg_samples=pos_edge_index.size(1))
+        self.num_neg_samples = num_neg_samples
 
-    # Gather embeddings
-    src_pos = h[pos_edge_index[0]] # [E_pos, out_dim]
-    dst_pos = h[pos_edge_index[1]] # [E_pos, out_dim]
-    src_neg = h[neg_edge_index[0]] # [E_pos, out_dim]
-    dst_neg = h[neg_edge_index[1]] # [E_pos, out_dim]
+        if self.num_neg_samples:
+            # FORWARD: SUBSAMPLED
+            self.forward = self._subsampled_graph_recon_loss
+        else:
+            # FORWARD: FULL
+            self.forward = self._full_graph_recon_loss
 
-    # Inner-product score
-    pos_scores = (src_pos * dst_pos).sum(dim=1)
-    neg_scores = (src_neg * dst_neg).sum(dim=1)
+    # SUBSAMPLED LOSS
+    def _subsampled_graph_recon_loss(self, h: torch.Tensor, edge_index: torch.LongTensor):
+        # Positive edges
+        pos_edge_index = edge_index  # shape [2, E_pos]
+        E_pos = pos_edge_index.size(1)
 
-    # Compute loss
-    pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
-    neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
-    return pos_loss + neg_loss
+        perm = torch.randperm(E_pos, device=pos_edge_index.device)[:self.num_neg_samples]
+        pos_edge_index_sub = pos_edge_index[:, perm] # shape [2, subsampling_size]
 
-# SUBSAMPLED LOSS
-def _subsampled_graph_recon_loss(h: torch.Tensor, edge_index: torch.LongTensor, subsampling_size: int):
-    # Positive edges
-    pos_edge_index = edge_index  # shape [2, E_pos]
-    E_pos = pos_edge_index.size(1)
+        # Negative edges
+        neg_edge_index_sub = pyg_utils.negative_sampling(
+            edge_index=pos_edge_index_sub,
+            num_nodes=h.size(0),
+            num_neg_samples=self.num_neg_samples)
 
-    perm = torch.randperm(E_pos, device=pos_edge_index.device)[:subsampling_size]
-    pos_edge_index_sub = pos_edge_index[:, perm] # shape [2, subsampling_size]
+        # Gather embeddings
+        src_pos = h[pos_edge_index_sub[0]]
+        dst_pos = h[pos_edge_index_sub[1]]
+        src_neg = h[neg_edge_index_sub[0]]
+        dst_neg = h[neg_edge_index_sub[1]]
 
-    # Negative edges
-    neg_edge_index_sub = pyg_utils.negative_sampling(
-        edge_index=pos_edge_index_sub,
-        num_nodes=h.size(0),
-        num_neg_samples=subsampling_size)
+        # Inner-product score
+        pos_scores = (src_pos * dst_pos).sum(dim=1)
+        neg_scores = (src_neg * dst_neg).sum(dim=1)
 
-    # Gather embeddings
-    src_pos = h[pos_edge_index_sub[0]]
-    dst_pos = h[pos_edge_index_sub[1]]
-    src_neg = h[neg_edge_index_sub[0]] # Dev. note: This may have been the source of the issue for graph rec. loss.
-    dst_neg = h[neg_edge_index_sub[1]]
+        # Compute loss
+        pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
+        neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
+        return pos_loss + neg_loss
 
-    # Inner-product score
-    pos_scores = (src_pos * dst_pos).sum(dim=1)
-    neg_scores = (src_neg * dst_neg).sum(dim=1)
+    # FULL LOSS
+    def _full_graph_recon_loss(self, h: torch.Tensor, edge_index: torch.LongTensor):
+        # Positive edges
+        pos_edge_index = edge_index  # shape [2, E_pos]
 
-    # Compute loss
-    pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
-    neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
-    return pos_loss + neg_loss
+        # Negative edges
+        neg_edge_index = pyg_utils.negative_sampling(
+            edge_index=pos_edge_index,
+            num_nodes=h.size(0),
+            num_neg_samples=pos_edge_index.size(1))
 
-# MAIN FUNCTION
-def graph_recon_loss(h: torch.Tensor, edge_index: torch.LongTensor, subsampling_size: int = None):
-    if subsampling_size is not None:
-        loss = _subsampled_graph_recon_loss(h, edge_index, subsampling_size)
-    else:
-        loss = _full_graph_recon_loss(h, edge_index)
-    return loss
+        # Gather embeddings
+        src_pos = h[pos_edge_index[0]] # [E_pos, out_dim]
+        dst_pos = h[pos_edge_index[1]] # [E_pos, out_dim]
+        src_neg = h[neg_edge_index[0]] # [E_pos, out_dim]
+        dst_neg = h[neg_edge_index[1]] # [E_pos, out_dim]
+
+        # Inner-product score
+        pos_scores = (src_pos * dst_pos).sum(dim=1)
+        neg_scores = (src_neg * dst_neg).sum(dim=1)
+
+        # Compute loss
+        pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
+        neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
+        return pos_loss + neg_loss

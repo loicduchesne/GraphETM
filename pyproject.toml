@@ -5,16 +5,19 @@ description = "Graph-Embedded Topic model integrating scRNA-seq gene expression 
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "celltypist>=1.7.1",
     "ipykernel>=6.29.5",
     "jupyterlab>=4.4.2",
+    "kaleido>=1.0.0",
     "numpy==2.2.5",
+    "optuna>=4.4.0",
     "pandas==2.2.3",
     "pandas-stubs==2.2.3.250308",
-    "plotly>=6.0.1",
+    "plotly>=6.2.0",
     "scanpy>=1.11.1",
     "scipy==1.15.3",
     "scipy-stubs==1.16.0.2",
     "torch>=2.7.0",
     "torch-geometric>=2.6.1",
-    "wandb>=0.19.11",
+    "wandb>=0.21.0",
 ]

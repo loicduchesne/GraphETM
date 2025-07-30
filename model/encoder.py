@@ -67,29 +67,29 @@ class Encoder(nn.Module):
         theta = F.softmax(mu_theta, dim=-1)
         return theta
 
-    def forward(self, bow_norm: torch.Tensor):
+    def forward(self, bow_normalized: torch.Tensor):
         """
         Returns parameters of the variational distribution for \theta.
 
         Args:
-            bow_norm: (batch, V) Normalized batch of Bag-of-Words.
+            bow_normalized: (batch, V) Normalized batch of Bag-of-Words.
 
         Returns:
-            mu_theta: mu_theta
-            logsigma_theta: logsigma_theta
-            kl_theta: kl_theta
+            mu: mu_theta
+            log_sigma: logsigma_theta
+            kl: kl
 
         """
-        q_theta = self.q_theta(bow_norm)
+        q_theta = self.q_theta(bow_normalized)
         if self.thres_dropout > 0:
             q_theta = self.dropout(q_theta)
-        mu_theta = self.mu_q_theta(q_theta)
-        logsigma_theta = self.logsigma_q_theta(q_theta)
+        mu = self.mu_q_theta(q_theta)
+        log_sigma = self.logsigma_q_theta(q_theta)
 
         # KL[q(theta)||p(theta)] = lnq(theta) - lnp(theta)
-        kl_theta = -0.5 * torch.sum(1 + logsigma_theta - mu_theta.pow(2) - logsigma_theta.exp(), dim=1).mean()
+        kl_theta = -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp(), dim=-1).mean()
 
-        return mu_theta, logsigma_theta, kl_theta
+        return mu, log_sigma, kl_theta
 
     def _get_activation(self, act): # TODO: Redundant method.
         if act == 'tanh':

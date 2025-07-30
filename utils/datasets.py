@@ -1,6 +1,5 @@
 # Imports
 import os
-import numpy as np
 import pandas as pd
 
 from tqdm.notebook import tqdm
@@ -8,6 +7,20 @@ from tqdm.notebook import tqdm
 import torch
 from torch_geometric.data import Data
 
+
+### ETM DATASET
+class ETMDataset(torch.utils.data.Dataset):
+    def __init__(self, data, labels) -> None:
+        self.data = data
+        self.labels = labels
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
+
+### IBKH DATASET
 class IBKHDataset:
     def __init__(self, data_dir: str):
         """
@@ -42,7 +55,7 @@ class IBKHDataset:
         self.triples = None
 
     def _rows_to_edges(self, df, src_conv, tgt_conv, src_map, tgt_map):
-        # df = df[df.iloc[:, 2] == 1].copy() # keep confirmed edges
+        # df = df[df.iloc[:, 2] == 1].copy() # keep confirmed edges # TODO: Does that mess up the embeddings?
         df = df.copy()
 
         df['src'] = df.iloc[:, 0].map(src_conv)

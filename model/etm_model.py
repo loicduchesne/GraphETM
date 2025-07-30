@@ -17,7 +17,7 @@ import torch.nn.functional as F
 # Description: MODEL assembles the GraphETM architecture using the ENCODER and DECODER.
 
 # ------------------------------------------------------------------
-# @title GraphETM Model # NOTE: I could potentially rename this etm_model (and the gcn graph_model) for consistency.
+# @title ETM Model
 class ETMModel(nn.Module):
     def __init__(
             self,
@@ -62,7 +62,7 @@ class ETMModel(nn.Module):
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
-            return eps.mul_(std).add_(mu)
+            return mu + eps * std
         else:
             return mu
 
@@ -102,7 +102,7 @@ class ETMModel(nn.Module):
 
     def step_forward(self, encoder, decoder, bow, rho, aggregate=True):
         bow_raw  = bow # integer counts
-        lengths  = bow_raw.sum(1, keepdim=True) + 1e-8
+        lengths  = bow_raw.sum(1, keepdim=True).clamp(min=1e-8)
         bow_norm = bow_raw / lengths # Normalize
 
         mu, logvar, kld = encoder(bow_norm) # NOTE: Is normalization appropriate (e.g.: for EHR)? Guess not..idk
@@ -110,9 +110,11 @@ class ETMModel(nn.Module):
         theta = F.softmax(z, dim=-1) # [D, K] (batch_size, num_topics)
 
         preds = decoder(theta, rho=rho)
-        rec_loss = -(preds * bow_raw).sum(1) / lengths.squeeze(1) # NOTE: lengths.squeeze(1) is the only key difference.
+        rec_loss = -(preds * bow_raw).sum(1)
         if aggregate:
-            rec_loss = rec_loss.mean()
+            rec_loss = rec_loss.mean() / lengths.mean()
+        else:
+            rec_loss = rec_loss / lengths.squeeze(1)
 
         return ({'theta': theta.detach(), 'preds': preds.detach()}, # Outputs
                 {'rec_loss': rec_loss,'kld': kld})                   # Losses
