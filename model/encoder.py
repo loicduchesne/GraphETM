@@ -13,8 +13,8 @@ class Encoder(nn.Module):
         Attributes:
                 q_theta: q_theta
                 theta_act: theta_act
-                mu_q_theta: mu_q_theta
-                logsigma_q_theta: logsigma_q_theta
+                mu: mu_q_theta
+                log_sigma: logsigma_q_theta
     """
     def __init__(
             self,
@@ -49,22 +49,22 @@ class Encoder(nn.Module):
             nn.Linear(encoder_hidden_size, encoder_hidden_size),
             self.theta_act,
         )
-        self.mu_q_theta = nn.Linear(encoder_hidden_size, num_topics, bias=True)
-        self.logsigma_q_theta = nn.Linear(encoder_hidden_size, num_topics, bias=True)
+        self.mu = nn.Linear(encoder_hidden_size, num_topics, bias=True)
+        self.log_sigma = nn.Linear(encoder_hidden_size, num_topics, bias=True)
 
-    def infer_topic_distribution(self, normalized_bows: torch.Tensor) -> torch.Tensor:
+    def get_topic_distribution(self, bow_normalized: torch.Tensor) -> torch.Tensor:
         """
             Returns a deterministic topic distribution for evaluation purposes bypassing the stochastic reparameterization step.
 
             Args:
-                normalized_bows (torch.Tensor): Normalized bag-of-words input.
+                bow_normalized (torch.Tensor): Normalized bag-of-words input.
 
             Returns:
                 torch.Tensor: Deterministic topic proportions.
         """
-        q_theta = self.q_theta(normalized_bows)
-        mu_theta = self.mu_q_theta(q_theta)
-        theta = F.softmax(mu_theta, dim=-1)
+        q_theta = self.q_theta(bow_normalized)
+        mu = self.mu(q_theta)
+        theta = F.softmax(mu, dim=-1)
         return theta
 
     def forward(self, bow_normalized: torch.Tensor):
@@ -83,8 +83,8 @@ class Encoder(nn.Module):
         q_theta = self.q_theta(bow_normalized)
         if self.thres_dropout > 0:
             q_theta = self.dropout(q_theta)
-        mu = self.mu_q_theta(q_theta)
-        log_sigma = self.logsigma_q_theta(q_theta)
+        mu = self.mu(q_theta)
+        log_sigma = self.log_sigma(q_theta)
 
         # KL[q(theta)||p(theta)] = lnq(theta) - lnp(theta)
         kl_theta = -0.5 * torch.sum(1 + log_sigma - mu.pow(2) - log_sigma.exp(), dim=-1).mean()

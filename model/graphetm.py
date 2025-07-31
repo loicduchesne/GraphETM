@@ -147,7 +147,7 @@ class GraphETM:
 
             pbar = trange(epochs, desc='Training GraphETM', unit='epoch', disable=not verbose)
 
-            for epoch in range(epochs):
+            for epoch in range(epochs): # FIXME: Refractor everything with pythonic notation + GraphETM (Vicky).
                 pbar.update(1)
                 # training ------------------------------------------------
                 self.etm_model.train(), self.graph_model.train()
