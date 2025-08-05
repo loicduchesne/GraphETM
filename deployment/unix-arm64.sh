@@ -21,7 +21,7 @@ echo "Installing PyTorch with CUDA 12.8..."
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 echo "Installing other Python packages..."
-pip install scikit-learn pandas plotly wandb notebook ipywidgets anndata scanpy celltypist
+pip install scikit-learn pandas plotly wandb notebook ipywidgets optuna anndata scanpy celltypist
 
 echo "Installing PyTorch Geometric and dependencies..."
 pip install torch_geometric
