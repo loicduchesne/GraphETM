@@ -4,8 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-### GRAPH-ETM MODEL ARCHITECTURE
-## DECODER BLOCK
 class Decoder(nn.Module):
     """
         Decoder module for GraphETM.
@@ -41,7 +39,7 @@ class Decoder(nn.Module):
 
     def get_beta(self):
         """
-            Retrieve beta by doing softmax over the vocabulary dimension.
+            Retrieve beta for a modality representing the topic-word (or topic-feature) distributions. It performs softmax of the vocabulary dimension.
 
             Returns:
                 Beta which represents the topic-word (or topic-feature) distributions.

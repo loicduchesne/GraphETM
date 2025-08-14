@@ -1,9 +1,8 @@
 ### Imports
 # Local
-from .etm_model import ETMModel
-from .graph_model import GraphModel
-from .loss import GraphReconLoss
-from .utils.run_helper import RunManager
+from graphetm import GraphETM
+from loss import GraphReconLoss
+from trainer_run_helper import RunManager
 
 # External
 import numpy as np
@@ -13,29 +12,21 @@ from itertools import cycle
 import torch
 import torch.nn.functional as F
 
-import wandb
-from tqdm.notebook import tqdm, trange
+from tqdm.notebook import trange
 
 from sklearn.cluster import KMeans
 from sklearn.metrics import adjusted_rand_score
 
 
 ### GRAPHETM MODEL (TRAINER)
-class GraphETM:
+class GraphETMTrainer:
     """
-    GraphETM model with an Embedded Topic Model (ETM) Encoder and Decoder and a Graph Convolutional Network (GCN) Filter.
+    Trainer for the GraphETM model, which includes all recordings for metrics as well as the loss computations.
 
     Args:
         etm_model_cfg (dict): The ETM model parameters.
         graph_model_cfg (dict): The Graph filter model parameters.
         graph_recon_loss_cfg (dict): The Graph Reconstruction Loss parameters.
-        embedding (torch.Tensor): Initial embedding (also known as rho) computed from the knowledge graph (e.g.:
-            TransE embeddings).
-        edge_index (torch.LongTensor): The edge indices for the embedding matrix.
-        id_embed_sc (np.ndarray): Array of indices corresponding to genes in the embedding matrix from the scRNA BoW
-            data.
-        id_embed_ehr (np.ndarray): Array of indices corresponding to diseases in the embedding matrix from the EHR BoW
-            data.
         dataloader_sc (torch.utils.data.DataLoader): The dataloader for the scRNA BoW data. Rows are cells and columns
             are genes.
         dataloader_ehr (torch.utils.data.DataLoader): The dataloader for the EHR BoW data. Rows are patients and
@@ -54,16 +45,7 @@ class GraphETM:
             Default: None.
     """
     def __init__(self,
-                 # Models:
-                 etm_model_cfg: Dict[str, Any],
-                 graph_model_cfg: Dict[str, Any],
-                 # Loss
-                 graph_recon_loss_cfg: Dict[str, Any],
-                 # Embedding:
-                 embedding: torch.Tensor,
-                 edge_index: torch.LongTensor,
-                 id_embed_sc : np.ndarray,
-                 id_embed_ehr: np.ndarray,
+                 model: GraphETM,
                  # Data:
                  dataloader_sc: torch.utils.data.DataLoader,
                  dataloader_ehr: torch.utils.data.DataLoader,
@@ -77,18 +59,8 @@ class GraphETM:
                  wandb_run = None):
 
         ## Models
-        self.etm_model = ETMModel(**etm_model_cfg, embedding_dim=graph_model_cfg['embedding_dim']).to(device) # TODO: Adjust model_cfg to account for rho
-        self.graph_model = GraphModel(**graph_model_cfg, edge_index=edge_index.to(device), embedding=embedding).to(device)
+        self.model = model.to(device)
         self.device = device
-
-        # Graph Loss
-        self.graph_recon_loss = GraphReconLoss(**graph_recon_loss_cfg).to(device)
-
-        ## Graph Embeddings
-        self.rho_full = embedding    # [N_total, L]
-        self.edge_index = edge_index
-        self.id_embed_sc  = torch.tensor(id_embed_sc , dtype=torch.long, device=device)
-        self.id_embed_ehr = torch.tensor(id_embed_ehr, dtype=torch.long, device=device)
 
         ## Data
         self.dataloader_sc  = dataloader_sc
@@ -139,24 +111,23 @@ class GraphETM:
         self._kld_max = kld_max
 
         with self.run_manager.wandb_run(): # Catches failed runs
-            self.etm_model.to(self.device), self.graph_model.to(self.device)
+            self.model.to(self.device)
 
             if self.run_manager:
-                self.run_manager.wandb.watch(self.etm_model, log_freq=1, log='all')
-                self.run_manager.wandb.watch(self.graph_model, log_freq=1, log='all')
+                self.run_manager.wandb.watch(self.model, log_freq=1, log='all')
 
             pbar = trange(epochs, desc='Training GraphETM', unit='epoch', disable=not verbose)
 
             for epoch in range(epochs): # FIXME: Refractor everything with pythonic notation + GraphETM (Vicky).
                 pbar.update(1)
                 # training ------------------------------------------------
-                self.etm_model.train(), self.graph_model.train()
+                self.model.train()
 
                 # KL Annealing
                 if kld_annealing_duration is not None:
-                    kl_annealing = min(kld_max, epoch / kld_annealing_duration)
+                    kl_annealing_weight = min(kld_max, epoch / kld_annealing_duration)
                 else:
-                    kl_annealing = 1.0
+                    kl_annealing_weight = 1.0
 
                 # Data cycling (datasets different lengths)
                 if len(self.dataloader_sc) > len(self.dataloader_ehr):
@@ -165,50 +136,38 @@ class GraphETM:
                     dataloader = zip(cycle(self.dataloader_sc), self.dataloader_ehr)
 
                 for bow_sc, bow_ehr in dataloader:
-                    if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
-                        continue
-
-                    # Zero grad
-                    optimizer.zero_grad()
-
-                    # To Device
+                    if bow_sc.shape[0] != bow_ehr.shape[0]: continue # Exclude last batch
                     bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
 
-                    # Filter: Forward
-                    rho_full_new = self.graph_model.forward() # [N_total, L] # TODO: What about batching these, instead of full?
-                    graph_loss = self.graph_recon_loss(rho_full_new, edge_index=self.edge_index) * graph_loss_weight
-
-                    rho_sc  = rho_full_new[self.id_embed_sc ] # [V_sc , L]
-                    rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
-
-                    # ETM: Forward
-                    outputs, losses = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
+                    optimizer.zero_grad()
+                    outputs, losses = self.model(bow_sc=bow_sc, bow_ehr=bow_ehr)
 
                     # NELBO Loss
                     loss = ((losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean()
-                            + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss)
+                            + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing_weight
+                            + losses['graph_loss'] * graph_loss_weight)
                     loss.backward()
                     optimizer.step()
 
                     # Log (batch-level) # TODO: Configure callbacks?
                     self.run_manager.log('total_loss', loss, on_step=True, phase='train')
-                    self.run_manager.log('graph_recon_loss', graph_loss, on_step=True, phase='train')
                     self.run_manager.log_dict(losses, on_step=True, phase='train')
                     self.run_manager.next_step()
 
                 # validation ------------------------------------------------
                 if self.val_dataloader_sc:
-                    self._evaluate(kl_annealing, recon_loss_weight, graph_loss_weight)
+                    self._evaluate(kl_annealing_weight, recon_loss_weight, graph_loss_weight)
 
                 self.run_manager.next_epoch()
             pbar.close()
 
 
     # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
-    def _evaluate(self, kl_annealing, recon_loss_weight, graph_loss_weight):
-        self.etm_model.eval(), self.graph_model.eval()
+    def _evaluate(self, kl_annealing_weight, recon_loss_weight, graph_loss_weight):
+        # evaluation ------------------------------------------------
+        self.model.eval()
 
-        with torch.no_grad():
+        with (torch.no_grad()):
             # Data cycling
             if len(self.val_dataloader_sc) > len(self.val_dataloader_ehr):
                 dataloader = zip(self.val_dataloader_sc, cycle(self.val_dataloader_ehr))
@@ -221,35 +180,22 @@ class GraphETM:
             labels_sc_batches  = [] # TODO: Make this method work if no labels are given.
             labels_ehr_batches = []
             for (bow_sc, labels_sc_batch), (bow_ehr, labels_ehr_batch) in dataloader: # TODO: Make this method work if no labels are given.
-                if bow_sc.shape[0] != bow_ehr.shape[0]: # Exclude last batch
-                    continue
-
-                # Store labels
-                labels_sc_batches.append(labels_sc_batch), labels_ehr_batches.append(labels_ehr_batch)
-
-                # To Device
+                if bow_sc.shape[0] != bow_ehr.shape[0]: continue # Exclude last batch
                 bow_sc, bow_ehr = bow_sc.to(self.device), bow_ehr.to(self.device)
 
-                # Graph: Forward
-                rho_full_new = self.graph_model.forward() # [N_total, L]
-                graph_loss = self.graph_recon_loss(rho_full_new, edge_index=self.edge_index) * graph_loss_weight
+                outputs, losses = self.model(bow_sc=bow_sc, bow_ehr=bow_ehr)
+                loss = ((losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean()
+                        + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing_weight
+                        + losses['graph_loss'] * graph_loss_weight)
 
-                rho_sc  = rho_full_new[self.id_embed_sc ] # [V_sc , L]
-                rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
-
-                # ETM: Forward
-                outputs, losses = self.etm_model(bow_sc=bow_sc, bow_ehr=bow_ehr, rho_sc=rho_sc, rho_ehr=rho_ehr)
-
-                # ELBO Loss
-                loss = (losses['sc']['rec_loss'] + losses['ehr']['rec_loss']).mean() + (losses['sc']['kld'] + losses['ehr']['kld']) * kl_annealing + graph_loss
-
-                # Theta
-                theta_sc_batches.append(outputs['sc']['theta'].cpu())
+                # Store labels
+                labels_sc_batches .append(labels_sc_batch)
+                labels_ehr_batches.append(labels_ehr_batch)
+                theta_sc_batches .append(outputs['sc' ]['theta'].cpu())
                 theta_ehr_batches.append(outputs['ehr']['theta'].cpu())
 
                 # Log (batch-level)
                 self.run_manager.log('total_loss', loss, on_step=True, phase='val', aggregate=True)
-                self.run_manager.log('graph_recon_loss', graph_loss, on_step=True, phase='val', aggregate=True)
                 self.run_manager.log_dict(losses, on_step=True, phase='val', aggregate=True)
 
             ### METRICS
@@ -325,8 +271,9 @@ class GraphETM:
         Check if topics learn similar patterns in embedding space
         """
         # Get average embeddings for top words in each topic
-        beta_sc = self.etm_model.dec_sc.get_beta()
-        beta_ehr = self.etm_model.dec_ehr.get_beta()
+        with torch.no_grad():
+            beta_sc = self.model.dec_sc.get_beta()
+            beta_ehr = self.model.dec_ehr.get_beta()
 
         topic_emb_sc = []
         topic_emb_ehr = []
@@ -334,12 +281,13 @@ class GraphETM:
         for k in range(beta_sc.shape[0]):
             # Top genes
             top_genes = beta_sc[k].topk(top_k).indices # Top genes for topic k
-            gene_embs = self.graph_model.forward()[self.id_embed_sc[top_genes]]
+            gene_embs = self.model.gcn.forward(embedding=self.model.embedding, edge_index=self.model.edge_index)[self.id_embed_sc[
+                top_genes]]
             topic_emb_sc.append(gene_embs.mean(0))
 
             # Top diseases
             top_diseases = beta_ehr[k].topk(top_k).indices # Top diseases for topic k
-            disease_embs = self.graph_model.forward()[self.id_embed_ehr[top_diseases]]
+            disease_embs = self.model.gcn.forward()[self.id_embed_ehr[top_diseases]]
             topic_emb_ehr.append(disease_embs.mean(0))
 
         # Compare topic embeddings between modalities
@@ -381,13 +329,3 @@ class GraphETM:
             ari_ehr = adjusted_rand_score(self.proxy_ehr, pred_ehr)
 
         return ari_sc, ari_ehr
-
-    # @deprecated('This metric is not relevant since I am doing unpaired integration.')
-    def ehr_from_scrna_recall(self, theta_sc, theta_ehr, k=5):
-        th_sc  = F.normalize(theta_sc, p=2, dim=1)
-        th_ehr = F.normalize(theta_ehr, p=2, dim=1)
-
-        sims = th_sc @ th_ehr.T # cosine similarity
-        topk = sims.topk(k, dim=1).indices
-        rows = torch.arange(th_sc.size(0)).unsqueeze(1)
-        return (topk == rows).any(1).float().mean().item()

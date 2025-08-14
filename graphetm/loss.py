@@ -1,17 +1,9 @@
-from typing import Dict, Any, Optional, List
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch_geometric.utils as pyg_utils
 
-### ELBO
-class ELBO(nn.Module):
-    def __init__(self):
-        super(ELBO, self).__init__()
 
-
-### GRAPH RECONSTRUCTION LOSS
 class GraphReconLoss(nn.Module):
     def __init__(
             self,

@@ -2,6 +2,7 @@
 # Local
 from .encoder import Encoder
 from .decoder import Decoder
+from .gcn import GCN
 
 # External
 import numpy as np
@@ -12,43 +13,65 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-### GRAPH-ETM MODEL ARCHITECTURE
-## Main GraphETM model.
-# Description: MODEL assembles the GraphETM architecture using the ENCODER and DECODER.
-
-# ------------------------------------------------------------------
-# @title ETM Model
-class ETMModel(nn.Module):
+class GraphETM(nn.Module):
+    """
+    GraphETM model with an Embedded Topic Model (ETM) Encoder and Decoder and a Graph Convolutional Network (GCN) Filter.
+    """
     def __init__(
             self,
-            encoder_params  : Dict[str, Dict[str, int]],
-            theta_act: str,
-            num_topics: int,
-            embedding_dim : int,
-            dropout = 0.2
+            encoder_params: Dict[str, Dict[str, int]],
+            gcn_params: Dict[str, int],
+            graph_recon_loss: torch.nn.Module,
+            # Embeddings:
+            embedding: torch.Tensor,
+            edge_index: torch.Tensor,
+            id_embed_sc: np.ndarray,
+            id_embed_ehr: np.ndarray,
+            # Params:
+            theta_act: str = 'relu',
+            num_topics: int = 25,
+            dropout: float = 0.2,
+            device: torch.device = torch.device('cpu'),
+
     ):
         """
-            Initialize the ETM model.
-
-            Args:
-                encoder_params: Dictionary of the parameters for the encoders. Dictionary {'sc': {str: Any}, 'ehr': {str: Any}}.
-                    vocab_size: Size of vocabulary.
-                    encoder_hidden_size: Size of the hidden layer in the encoder.
-                theta_act: Activation function for theta.
-                num_topics: Number of topics.
-
-
-                id_embed_sc : Index map for the genes found in the Gene Expression (BoW) matrix input and the Knowledge Graph embedding genes. It should be a numpy list where each index maps to a gene in the embeddings. This allows aligning the relevant genes to the genes found in the embeddings.
-                id_embed_ehr: Index map for the diseases found in the Electronic Health Record (BoW) matrix input and the Knowledge Graph embedding diseases. It should be a numpy list where each index maps to a disease in the embeddings. This allows aligning the relevant genes to the genes found in the embeddings.
-                trainable_embeddings: Whether to fine-tune word embeddings.
-
-                dropout: Dropout rate.
-
+        Args:
+            encoder_params (dict): Dictionary of the parameters for the encoders. Dictionary {'sc': {str: Any},
+                'ehr': {str: Any}}. (vocab_size: Size of vocabulary, encoder_hidden_size: Size of the hidden layer in
+                the encoder).
+            gcn_params: (dict): Dictionary for the GCN parameters.
+            graph_recon_loss (torch.nn.Module): Graph reconstruction loss function for the GCN.
+            embedding (torch.Tensor): Initial embedding (also known as rho) computed from the knowledge graph (e.g.:
+                TransE embeddings).
+            edge_index (torch.Tensor): The edge indices for the embedding matrix.
+            id_embed_sc (np.ndarray): Array of indices corresponding to genes in the embedding matrix from the scRNA BoW
+                data.
+            id_embed_ehr (np.ndarray): Array of indices corresponding to diseases in the embedding matrix from the EHR BoW
+                data.
+            theta_act (str): Activation function for theta.
+                Default: 'relu'.
+            num_topics (int): Number of topics.
+                Default: 25.
+            dropout (float): Dropout rate.
+                Default: 0.2.
+            device (torch.device): Device to be used.
+                Default: torch.device('cpu').
         """
-        super(ETMModel, self).__init__()
+
+        super(GraphETM, self).__init__()
 
         self.encoder_params = encoder_params
+        self.graph_recon_loss = graph_recon_loss.to(device)
 
+        ## Embeddings
+        embedding_dim = embedding.shape[1]
+        self.register_buffer('embedding', embedding) # [N_total, L]
+        self.edge_index = edge_index.to(device)
+        self.id_embed_sc  = torch.tensor(id_embed_sc , dtype=torch.long, device=device)
+        self.id_embed_ehr = torch.tensor(id_embed_ehr, dtype=torch.long, device=device)
+
+        ## Layers
+        self.gcn = GCN(**gcn_params, embedding_dim=embedding_dim)
         self.enc_sc  = Encoder(**encoder_params['sc'],  num_topics=num_topics, dropout=dropout, theta_act=theta_act)
         self.enc_ehr = Encoder(**encoder_params['ehr'], num_topics=num_topics, dropout=dropout, theta_act=theta_act)
         self.dec_sc  = Decoder(embedding_dim=embedding_dim, num_topics=num_topics)
@@ -62,7 +85,7 @@ class ETMModel(nn.Module):
         if self.training:
             std = torch.exp(0.5 * logvar)
             eps = torch.randn_like(std)
-            return mu + eps * std
+            return eps.mul_(std).add_(mu)
         else:
             return mu
 
@@ -79,33 +102,12 @@ class ETMModel(nn.Module):
         theta = self.encoder.infer_topic_distribution(normalized_bows) # FIXME: To fix.
         return theta
 
-    def get_beta(self, modality: str):
-        """
-            Retrieve beta for the selecting modality which represents the topic-word (or topic-feature) distributions for that modality. It performs softmax of the vocabulary dimension. Calling this method puts the model into an evaluation state.
-
-            Args:
-                modality (str): "sc" single-cell RNA modality or "ehr" Electronic Health Record (diseases) modality.
-
-            Returns:
-                 np.ndarray: Beta representing the topic-word (or topic-feature) distributions.
-        """
-        if modality == 'sc':
-            decoder = self.dec_sc
-        elif modality == 'ehr':
-            decoder = self.dec_ehr
-        else:
-            raise ValueError('The modality parameter must be either "sc" or "ehr".')
-
-        with torch.no_grad():
-            beta = decoder.get_beta().cpu().numpy()
-        return beta
-
     def step_forward(self, encoder, decoder, bow, rho, aggregate=True):
         bow_raw  = bow # integer counts
         lengths  = bow_raw.sum(1, keepdim=True).clamp(min=1e-8)
         bow_norm = bow_raw / lengths # Normalize
 
-        mu, logvar, kld = encoder(bow_norm) # NOTE: Is normalization appropriate (e.g.: for EHR)? Guess not..idk
+        mu, logvar, kld = encoder(bow_norm)
         z = self.reparameterize(mu, logvar)
         theta = F.softmax(z, dim=-1) # [D, K] (batch_size, num_topics)
 
@@ -119,14 +121,12 @@ class ETMModel(nn.Module):
         return ({'theta': theta.detach(), 'preds': preds.detach()}, # Outputs
                 {'rec_loss': rec_loss,'kld': kld})                   # Losses
 
-    def forward(self, bow_sc, bow_ehr, rho_sc, rho_ehr):
+    def forward(self, bow_sc, bow_ehr):
         """
         Forward pass for the multi-modal Embedded Topic Model (ETM).
         Args:
             bow_sc : Bag-of-words representation of single-cell (SC) RNA modality.
             bow_ehr: Bag-of-words representation of Electronic Health Record (EHR) modality.
-            rho_sc : Embedding rho for the single-cell (SC) RNA modality.
-            rho_ehr: Embedding rho for the Electronic Health Record (EHR) modality.
 
         Returns:
             Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]: Tuple (outputs, losses) with outputs and losses
@@ -134,6 +134,13 @@ class ETMModel(nn.Module):
             outputs contain keys 'theta' and 'preds'. Modalities within losses contain keys 'rec_loss' and 'kld'.
 
         """
+        # Filter: Forward
+        rho_full_new = self.gcn.forward(embedding=self.embedding, edge_index=self.edge_index) # [N_total, L]
+        graph_loss = self.graph_recon_loss(rho_full_new, edge_index=self.edge_index)
+
+        rho_sc  = rho_full_new[self.id_embed_sc]  # [V_sc , L]
+        rho_ehr = rho_full_new[self.id_embed_ehr] # [V_ehr, L]
+
         # Encoder-Decoder: ScRNA
         outputs_sc, losses_sc = self.step_forward(
             bow=bow_sc,
@@ -150,4 +157,4 @@ class ETMModel(nn.Module):
 
 
         return ({'sc': outputs_sc, 'ehr': outputs_ehr}, # Outputs
-                {'sc': losses_sc , 'ehr': losses_ehr})  # Losses
+                {'sc': losses_sc , 'ehr': losses_ehr, 'graph_loss': graph_loss})  # Losses

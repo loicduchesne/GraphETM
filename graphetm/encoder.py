@@ -4,8 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-### GRAPH-ETM MODEL ARCHITECTURE
-## ENCODER BLOCK
 class Encoder(nn.Module):
     """
         Encoder module for GraphETM.
