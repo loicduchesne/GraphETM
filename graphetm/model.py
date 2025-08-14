@@ -1,8 +1,8 @@
 ### Imports
 # Local
-from .encoder import Encoder
-from .decoder import Decoder
-from .gcn import GCN
+from components.encoder import Encoder
+from components.decoder import Decoder
+from components.gcn import GCN
 
 # External
 import numpy as np
