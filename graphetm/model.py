@@ -1,8 +1,8 @@
 ### Imports
 # Local
-from components.encoder import Encoder
-from components.decoder import Decoder
-from components.gcn import GCN
+from .components.encoder import Encoder
+from .components.decoder import Decoder
+from .components.gcn import GCN
 
 # External
 import numpy as np
@@ -70,6 +70,9 @@ class GraphETM(nn.Module):
         self.id_embed_sc  = torch.tensor(id_embed_sc , dtype=torch.long, device=device)
         self.id_embed_ehr = torch.tensor(id_embed_ehr, dtype=torch.long, device=device)
 
+        ## Alpha
+        self.alphas = nn.Linear(embedding_dim, num_topics, bias=False) # alphas: [L, K (topic size)] Topic embedding matrix.
+
         ## Layers
         self.gcn = GCN(**gcn_params, embedding_dim=embedding_dim)
         self.enc_sc  = Encoder(**encoder_params['sc'],  num_topics=num_topics, dropout=dropout, theta_act=theta_act)
@@ -111,7 +114,7 @@ class GraphETM(nn.Module):
         z = self.reparameterize(mu, logvar)
         theta = F.softmax(z, dim=-1) # [D, K] (batch_size, num_topics)
 
-        preds = decoder(theta, rho=rho)
+        preds = decoder(theta, rho=rho, alphas=self.alphas)
         rec_loss = -(preds * bow_raw).sum(1)
         if aggregate:
             rec_loss = rec_loss.mean() / lengths.mean()

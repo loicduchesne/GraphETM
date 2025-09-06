@@ -262,8 +262,8 @@ class GraphETMTrainer:
             Tuple for the scRNA TD (0) and the EHR TD (1).
         """
         with torch.no_grad():
-            beta_sc  = self.model.dec_sc.get_beta().cpu().numpy()
-            beta_ehr = self.model.dec_ehr.get_beta().cpu().numpy()
+            beta_sc  = self.model.dec_sc.beta.cpu().numpy()
+            beta_ehr = self.model.dec_ehr.beta.cpu().numpy()
 
         top_sc  = np.argsort(beta_sc,  axis=1)[:, -top_k:]
         top_ehr = np.argsort(beta_ehr, axis=1)[:, -top_k:]
@@ -279,8 +279,8 @@ class GraphETMTrainer:
         """
         # Get average embeddings for top words in each topic
         with torch.no_grad():
-            beta_sc = self.model.dec_sc.get_beta()
-            beta_ehr = self.model.dec_ehr.get_beta()
+            beta_sc = self.model.dec_sc.beta
+            beta_ehr = self.model.dec_ehr.beta
 
         topic_emb_sc = []
         topic_emb_ehr = []

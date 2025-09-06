@@ -10,7 +10,6 @@ class Decoder(nn.Module):
 
         Attributes:
             rho: [V (Vocab. size), L (Emb. dim.)] Word embedding matrix.
-            alphas: [L, K (topic size)] Topic embedding matrix.
     """
     def __init__(
             self,
@@ -31,26 +30,23 @@ class Decoder(nn.Module):
         ## define the word embedding matrix \rho
         self.rho = None # [V, L]
 
-        ## define the matrix containing the topic embeddings
-        self.alphas = nn.Linear(embedding_dim, num_topics, bias=False)
-
         ## define beta
         self.beta = None
 
-    def get_beta(self):
+    def get_beta(self, alphas):
         """
             Retrieve beta for a modality representing the topic-word (or topic-feature) distributions. It performs softmax of the vocabulary dimension.
 
             Returns:
                 Beta which represents the topic-word (or topic-feature) distributions.
         """
-        logits = self.alphas(self.rho)
+        logits = alphas(self.rho)
         self.beta = F.softmax(logits.T, dim=1) # NOTE: Transposing here now for fun i guess.
         return self.beta
 
-    def forward(self, theta, rho):
+    def forward(self, theta, alphas, rho):
         self.rho = rho # Update embeddings
 
-        beta = self.get_beta()
+        beta = self.get_beta(alphas=alphas)
         preds = torch.log(torch.mm(theta, beta) + 1e-8)
         return preds
