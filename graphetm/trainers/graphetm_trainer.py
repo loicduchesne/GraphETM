@@ -1,8 +1,7 @@
 ### Imports
 # Local
-from graphetm import GraphETM
-from loss import GraphReconLoss
-from trainer_run_helper import RunManager
+from ..model import GraphETM
+from .trainer_run_helper import RunManager
 
 # External
 import numpy as np
@@ -214,6 +213,13 @@ class GraphETMTrainer:
             self.run_manager.log_dict({'sc/td': td[0], 'ehr/td': td[1]}, on_epoch=True, phase='val')
             self.run_manager.log('topic_emb_alignment', top_al, on_epoch=True, phase='val')
 
+            # Saving outputs
+            self.theta_sc  = theta_sc.numpy() # Saving
+            self.theta_ehr = theta_ehr.numpy()
+
+            self.all_labels_sc = all_labels_sc
+            self.all_labels_ehr = all_labels_ehr
+
 
     # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
     def measure_ari(self, theta_sc, theta_ehr, labels_sc, labels_ehr, random_state=0):
@@ -255,8 +261,9 @@ class GraphETMTrainer:
         Returns:
             Tuple for the scRNA TD (0) and the EHR TD (1).
         """
-        beta_sc  = self.etm_model.get_beta(modality='sc')
-        beta_ehr = self.etm_model.get_beta(modality='ehr')
+        with torch.no_grad():
+            beta_sc  = self.model.dec_sc.get_beta().cpu().numpy()
+            beta_ehr = self.model.dec_ehr.get_beta().cpu().numpy()
 
         top_sc  = np.argsort(beta_sc,  axis=1)[:, -top_k:]
         top_ehr = np.argsort(beta_ehr, axis=1)[:, -top_k:]
@@ -281,13 +288,12 @@ class GraphETMTrainer:
         for k in range(beta_sc.shape[0]):
             # Top genes
             top_genes = beta_sc[k].topk(top_k).indices # Top genes for topic k
-            gene_embs = self.model.gcn.forward(embedding=self.model.embedding, edge_index=self.model.edge_index)[self.id_embed_sc[
-                top_genes]]
+            gene_embs = self.model.gcn(embedding=self.model.embedding, edge_index=self.model.edge_index)[self.model.id_embed_sc[top_genes]]
             topic_emb_sc.append(gene_embs.mean(0))
 
             # Top diseases
             top_diseases = beta_ehr[k].topk(top_k).indices # Top diseases for topic k
-            disease_embs = self.model.gcn.forward()[self.id_embed_ehr[top_diseases]]
+            disease_embs = self.model.gcn(embedding=self.model.embedding, edge_index=self.model.edge_index)[self.model.id_embed_ehr[top_diseases]]
             topic_emb_ehr.append(disease_embs.mean(0))
 
         # Compare topic embeddings between modalities
@@ -329,3 +335,23 @@ class GraphETMTrainer:
             ari_ehr = adjusted_rand_score(self.proxy_ehr, pred_ehr)
 
         return ari_sc, ari_ehr
+
+
+    # ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+    def save_outputs(self, path:str = 'outputs/last-run'):
+        np.save(f'{path}/theta_sc.npy',  self.theta_sc)  # TODO: Rename SC -> gene
+        np.save(f'{path}/theta_ehr.npy', self.theta_ehr) # TODO: Rename EHR -> disease
+        print(f'Saved SC and EHR thetas at... {path}/theta_MODALITY.npy')
+
+        # TODO: Save labels
+
+        # TODO: Save beta for genes, diseases, and drugs.
+        with torch.no_grad():
+            beta_sc   = self.model.dec_sc.get_beta().cpu().numpy()
+            beta_ehr  = self.model.dec_ehr.get_beta().cpu().numpy()
+            # beta_drug = self.model.dec_drug.get_beta().cpu().numpy()
+
+        np.save(f'{path}/beta_sc.npy',   beta_sc)
+        np.save(f'{path}/beta_ehr.npy',  beta_ehr)
+        # np.save(f'{path}/beta_drug.npy', beta_drug)
+        print(f'Saved SC and EHR betas at... {path}/beta_MODALITY.npy')
