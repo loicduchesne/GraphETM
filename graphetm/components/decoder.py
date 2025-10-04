@@ -41,7 +41,7 @@ class Decoder(nn.Module):
                 Beta which represents the topic-word (or topic-feature) distributions.
         """
         logits = alphas(self.rho)
-        self.beta = F.softmax(logits.T, dim=1) # NOTE: Transposing here now for fun i guess.
+        self.beta = F.softmax(logits.T, dim=1)
         return self.beta
 
     def forward(self, theta, alphas, rho):
